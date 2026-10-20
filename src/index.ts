@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { App, LogLevel } from "@slack/bolt";
+import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { parsePRUrl, parseAllPRUrls, fetchPRDetails, submitGitHubReview } from "./github.js";
 import { generatePRReview, generatePairedPRReview } from "./ai.js";
@@ -522,9 +523,39 @@ app.action("btn_discard_review", async ({ action, ack, respond }) => {
   });
 });
 
-// Start the Bolt App
+// Health Check HTTP Server (for Koyeb, Render, Fly.io, etc.)
+const healthServer = http.createServer((req, res) => {
+  const url = (req.url || "/").split("?")[0];
+
+  if (url === "/health" || url === "/healthz" || url === "/") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        status: "ok",
+        service: "slack-pr-reviewer",
+        uptimeSeconds: Math.floor(process.uptime()),
+        pendingReviewsCount: pendingReviews.size,
+        timestamp: new Date().toISOString(),
+      })
+    );
+    return;
+  }
+
+  res.writeHead(404, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "Not Found" }));
+});
+
+// Start the Bolt App and Health Server
 (async () => {
   const port = Number(process.env.PORT) || 3000;
-  await app.start(port);
+
+  // Bind HTTP server on PORT for cloud platform health checks
+  healthServer.listen(port, "0.0.0.0", () => {
+    console.log(`🩺 Health check endpoint listening on http://0.0.0.0:${port}/health`);
+  });
+
+  // Start Slack Socket Mode client
+  await app.start();
   console.log(`⚡️ Slack PR Review Bot is running in Socket Mode!`);
 })();
+
