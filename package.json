@@ -1,0 +1,21 @@
+{
+  "name": "slack-pr-reviewer",
+  "version": "1.0.0",
+  "description": "AI-assisted PR review bot with Slack approval, posting under your personal GitHub identity",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@google/genai": "^2.30.0",
+    "@octokit/rest": "^21.1.1",
+    "@slack/bolt": "^4.2.1",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
