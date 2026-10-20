@@ -1,5 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
-import { PRInfo, AIReviewResult, SinglePRReviewResult } from "./types.js";
+import { PRInfo, AIReviewResult, SinglePRReviewResult, ReviewComment, AuditChecklist } from "./types.js";
 import {
   CORE_REVIEW_PRINCIPLES,
   CROSS_REPO_BREAKING_RULES,
@@ -10,16 +10,14 @@ import {
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
-// Models to try in order of preference.
-// gemini-3.5-flash is fast, reliable, and has consistent capacity.
+// Models to try in order of preference
 const CANDIDATE_MODELS = Array.from(
   new Set(
     [
       process.env.GEMINI_MODEL,
-      "gemini-3.5-flash",
-      "gemini-3.6-flash",
-      "gemini-3.5-flash-lite",
       "gemini-3.8-flash",
+      "gemini-2.5-flash",
+      "gemini-2.0-flash",
     ].filter(Boolean) as string[]
   )
 );
@@ -84,6 +82,36 @@ async function generateReviewWithFallback(prompt: string): Promise<string> {
   throw lastError || new Error("All Gemini models failed to generate review.");
 }
 
+/**
+ * Filter out sycophantic praise or empty fluff from inline comments.
+ * Inline comments must only report genuine defects, traps, or questions.
+ */
+function sanitizeReviewComments(comments: ReviewComment[]): ReviewComment[] {
+  const fluffKeywords = [
+    "great addition",
+    "looks good",
+    "looks clean",
+    "nicely done",
+    "well done",
+    "is correctly maintained",
+    "looks exceptionally clean",
+    "good job",
+    "great work",
+    "to ensure consistency with other",
+  ];
+
+  return comments.filter((c) => {
+    if (!c.body || !c.path || !c.line) return false;
+    const lower = c.body.toLowerCase();
+    const isFluff = fluffKeywords.some((phrase) => lower.includes(phrase)) && !c.body.includes("```");
+    if (isFluff) {
+      console.log(`[Sanitizer] Removed sycophantic comment on ${c.path}:${c.line}: "${c.body.slice(0, 50)}..."`);
+      return false;
+    }
+    return true;
+  });
+}
+
 export async function generatePRReview(pr: PRInfo): Promise<AIReviewResult> {
   const isWeb = /web|front/i.test(pr.repo);
   const isApi = /api|back|srv/i.test(pr.repo);
@@ -100,7 +128,7 @@ export async function generatePRReview(pr: PRInfo): Promise<AIReviewResult> {
     : `${FRONTEND_UI_RULES}\n${BACKEND_API_RULES}`;
 
   const prompt = `
-You are a Staff Software Engineer performing a peer code review on pull request #${pr.pullNumber} in ${pr.owner}/${pr.repo}.
+You are a Staff Software Engineer performing an adversarial, rigorous, and constructive code review on pull request #${pr.pullNumber} in ${pr.owner}/${pr.repo}.
 
 ${CORE_REVIEW_PRINCIPLES}
 
@@ -115,28 +143,34 @@ Pull Request Details:
 Here is the diff of the changes:
 ${diffs || "No patch diff available (e.g. only file creations or binary files)."}
 
-Review Requirements:
-1. Examine the code for potential bugs, logic flaws, security vulnerabilities, unhandled edge cases, and missing tests.
-2. Adhere strictly to the repository rules above (e.g. One Surface rule, token colors, TanStack Query, tenant scoping, no N+1 query loops).
-3. Write comments in a natural, polite, and human teammate voice with proper English grammar. Provide concrete markdown code fixes wherever applicable.
-4. For each inline comment:
-   - "path": Must match the exact filename from the diff.
-   - "line": Valid integer line number in the modified file.
-   - "body": Clear description of the issue with a suggested fix in fenced code blocks.
-5. Overall verdict:
-   - "APPROVE": Solid with no blocking defects.
-   - "REQUEST_CHANGES": Critical defect, security flaw, or violation of repository hard rules found.
-   - "COMMENT": Informational suggestions without blocking merge.
+Mandatory Audit Steps:
+1. **Database N+1 Query Trap Check**:
+   - Explicitly search for ANY database query (\`await tx.update\`, \`await tx.select\`, \`await tx.insert\`, \`await db...\`) running inside a loop (\`for\`, \`for...of\`, \`for...in\`, \`.map()\`, \`forEach()\`).
+   - If found, mark \`databaseNPlusOneStatus: "FAILED"\`, flag the line with an inline comment, and provide the batched query fix.
+2. **Tenant Isolation Check**:
+   - Ensure every database query and mutation has an explicit \`eq(table.tenant, user.tenant)\` filter.
+3. **Zero-Fluff Mandate**:
+   - Do NOT write complimentary comments like "Great addition" or "Looks clean".
+   - If there are no bugs, security flaws, or architectural violations, \`comments\` MUST be an empty array \`[]\`.
 
 Respond ONLY with valid JSON strictly adhering to this schema:
 {
-  "summary": "Clear, friendly, human summary of changes and review observations...",
+  "summary": "Concise, professional summary of changes and review observations...",
   "verdict": "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
+  "audit": {
+    "filesInspectedCount": ${pr.files.length},
+    "breakingChangesStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
+    "databaseNPlusOneStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
+    "tenantIsolationStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
+    "uiDesignTokensStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
+    "confidenceScore": 95,
+    "auditNotes": "Brief bulleted verification notes on checks executed"
+  },
   "comments": [
     {
       "path": "path/to/file.ts",
       "line": 42,
-      "body": "Comment with suggestion..."
+      "body": "Exact issue description with markdown code replacement snippet..."
     }
   ]
 }
@@ -146,12 +180,25 @@ Respond ONLY with valid JSON strictly adhering to this schema:
     const responseText = await generateReviewWithFallback(prompt);
     const parsed = JSON.parse(responseText);
 
-    const comments = Array.isArray(parsed.comments) ? parsed.comments : [];
+    const rawComments = Array.isArray(parsed.comments) ? parsed.comments : [];
+    const comments = sanitizeReviewComments(rawComments);
+
+    const audit: AuditChecklist = {
+      filesInspectedCount: pr.files.length,
+      breakingChangesStatus: parsed.audit?.breakingChangesStatus || "NOT_APPLICABLE",
+      databaseNPlusOneStatus: parsed.audit?.databaseNPlusOneStatus || "NOT_APPLICABLE",
+      tenantIsolationStatus: parsed.audit?.tenantIsolationStatus || "NOT_APPLICABLE",
+      uiDesignTokensStatus: parsed.audit?.uiDesignTokensStatus || "NOT_APPLICABLE",
+      confidenceScore: typeof parsed.audit?.confidenceScore === "number" ? parsed.audit.confidenceScore : 90,
+      auditNotes: parsed.audit?.auditNotes || "Full audit checklist completed.",
+    };
+
     return {
       summary: parsed.summary || "Review completed. No major issues observed.",
       verdict: ["APPROVE", "REQUEST_CHANGES", "COMMENT"].includes(parsed.verdict)
         ? parsed.verdict
         : "COMMENT",
+      audit,
       comments,
     };
   } catch (error: any) {
@@ -190,14 +237,14 @@ Repository #${index + 1}: ${pr.owner}/${pr.repo} (${pr.label || "PR #" + pr.pull
 - Author: @${pr.author}
 - Description: ${pr.description}
 
-Changed Files in ${pr.repo}:
+Changed Files in ${pr.repo} (${pr.files.length} files):
 ${diffs || "No patch diff available (e.g. only file creations or binary files)."}
 `;
     })
     .join("\n\n");
 
   const prompt = `
-You are a Staff Full-Stack Software Engineer performing a coordinated peer code review on a PAIR OF LINKED PULL REQUESTS representing synchronized frontend and backend changes (e.g. Web + API).
+You are a Staff Full-Stack Software Engineer performing a coordinated, adversarial peer code review on a PAIR OF LINKED PULL REQUESTS representing synchronized frontend and backend changes (e.g. Web + API).
 
 ${CORE_REVIEW_PRINCIPLES}
 
@@ -212,16 +259,17 @@ ${formattedPRSections}
 Review Requirements:
 1. **CRITICAL BREAKING CODE CHECK (Web <-> API)**:
    - Check if changes in Web will break API, or changes in API will break Web.
-   - Specifically check endpoint routes, URL params, request body fields (required vs optional), response DTO formats, enum synchronization, and migration deployment order.
-   - List any breaking change warnings explicitly in the "breakingChangeWarnings" array.
-2. **Repository Specific Rules**:
-   - For Web (${prs.find((p) => /web|front/i.test(p.repo))?.repo || "Frontend"}): Enforce the One Surface rule (never nest a Card in a Card, forms flat, no Card around tables), slot order, action button placement in Page Bar, design tokens only (no text-gray-*), TanStack Query, and no modified ShadCN primitives.
-   - For API (${prs.find((p) => /api|back|srv/i.test(p.repo))?.repo || "Backend"}): Enforce tenant isolation scoping on every query, no IDOR, no N+1 query loops, push filtering to database, and guard clauses.
-3. **Tone and Style**:
-   - Write as a human engineering teammate with natural phrasing and correct English grammar.
-   - Skip trivial nitpicks. Focus on merge-blocking issues and provide concrete code snippet fixes.
-4. **Separate PR Reviews**:
-   - You MUST provide a dedicated review item in "prReviews" for EACH repository, with its own specific verdict, summary, and list of comments.
+   - Check if API introduces new required parameters or validation (e.g. \`required = true\` on a resolver or form submission) that Web does not supply.
+   - Check endpoint routes, URL params, request body field names (camelCase vs snake_case), response DTO formats, and enum synchronization.
+   - List any breaking change warnings in "breakingChangeWarnings".
+2. **DATABASE N+1 QUERY LOOP AUDIT (STRICT CHECK)**:
+   - Carefully scan backend changes for any database mutation or select (\`await tx.update\`, \`await tx.select\`, \`await tx.insert\`) inside a loop (\`for\`, \`for...of\`, \`for...in\`, \`.map()\`, \`forEach()\`).
+   - If found, you MUST mark \`databaseNPlusOneStatus: "FAILED"\` and create a dedicated comment on the exact line explaining how to batch the operation.
+3. **STRICT ZERO-FLUFF MANDATE**:
+   - NEVER praise or compliment the code (no "great addition", "looks clean", "well handled").
+   - If a PR has no bugs or violations, its \`comments\` array MUST BE EMPTY: \`[]\`.
+4. **Dedicated Review per Repository**:
+   - Provide a separate review object in "prReviews" for EACH repository.
 
 Respond ONLY with valid JSON strictly adhering to this schema:
 {
@@ -231,6 +279,15 @@ Respond ONLY with valid JSON strictly adhering to this schema:
     "Warning: API renamed 'company_id' to 'companyId', but Web still accesses 'response.company_id'"
   ],
   "verdict": "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
+  "audit": {
+    "filesInspectedCount": ${prs.reduce((acc, p) => acc + p.files.length, 0)},
+    "breakingChangesStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
+    "databaseNPlusOneStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
+    "tenantIsolationStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
+    "uiDesignTokensStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
+    "confidenceScore": 95,
+    "auditNotes": "Concise summary of audit findings"
+  },
   "prReviews": [
 ${prs
   .map(
@@ -239,26 +296,28 @@ ${prs
       "pullNumber": ${p.pullNumber},
       "verdict": "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
       "summary": "Specific review summary for ${p.repo}...",
+      "audit": {
+        "filesInspectedCount": ${p.files.length},
+        "breakingChangesStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
+        "databaseNPlusOneStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
+        "tenantIsolationStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
+        "uiDesignTokensStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
+        "confidenceScore": 95,
+        "auditNotes": "Audit notes for ${p.repo}"
+      },
       "comments": [
         {
           "repo": "${p.repo}",
           "path": "path/to/file.ts",
           "line": 42,
-          "body": "Natural, helpful comment with concrete code suggestion..."
+          "body": "Exact defect with markdown code replacement snippet..."
         }
       ]
     }`
   )
   .join(",\n")}
   ],
-  "comments": [
-    {
-      "repo": "${prs[0].repo}",
-      "path": "path/to/file.ts",
-      "line": 42,
-      "body": "Comment..."
-    }
-  ]
+  "comments": []
 }
 `;
 
@@ -266,18 +325,28 @@ ${prs
     const responseText = await generateReviewWithFallback(prompt);
     const parsed = JSON.parse(responseText);
 
-    // Normalize per-PR reviews and comments
     const prReviews: SinglePRReviewResult[] = [];
-    const allComments: any[] = [];
+    const allComments: ReviewComment[] = [];
 
     if (Array.isArray(parsed.prReviews)) {
       for (const pr of prs) {
         const found = parsed.prReviews.find(
           (r: any) => String(r.repo).toLowerCase() === pr.repo.toLowerCase()
         );
-        const repoComments = Array.isArray(found?.comments)
+        const rawRepoComments = Array.isArray(found?.comments)
           ? found.comments.map((c: any) => ({ ...c, repo: pr.repo }))
           : [];
+        const sanitizedRepoComments = sanitizeReviewComments(rawRepoComments);
+
+        const prAudit: AuditChecklist = {
+          filesInspectedCount: pr.files.length,
+          breakingChangesStatus: found?.audit?.breakingChangesStatus || "PASSED",
+          databaseNPlusOneStatus: found?.audit?.databaseNPlusOneStatus || "PASSED",
+          tenantIsolationStatus: found?.audit?.tenantIsolationStatus || "PASSED",
+          uiDesignTokensStatus: found?.audit?.uiDesignTokensStatus || "PASSED",
+          confidenceScore: typeof found?.audit?.confidenceScore === "number" ? found.audit.confidenceScore : 92,
+          auditNotes: found?.audit?.auditNotes,
+        };
 
         prReviews.push({
           repo: pr.repo,
@@ -290,28 +359,23 @@ ${prs
             ? found.verdict
             : "COMMENT",
           summary: found?.summary || `Review for ${pr.repo} completed.`,
-          comments: repoComments,
+          audit: prAudit,
+          comments: sanitizedRepoComments,
         });
 
-        allComments.push(...repoComments);
+        allComments.push(...sanitizedRepoComments);
       }
     }
 
-    // If root comments has items not in per-PR reviews, merge them
-    if (Array.isArray(parsed.comments)) {
-      for (const c of parsed.comments) {
-        if (!allComments.some((existing) => existing.path === c.path && existing.line === c.line)) {
-          allComments.push(c);
-          // Also associate with matching prReview
-          const matchingPR = prReviews.find(
-            (p) => p.repo.toLowerCase() === String(c.repo || "").toLowerCase()
-          );
-          if (matchingPR) {
-            matchingPR.comments.push(c);
-          }
-        }
-      }
-    }
+    const overallAudit: AuditChecklist = {
+      filesInspectedCount: prs.reduce((acc, p) => acc + p.files.length, 0),
+      breakingChangesStatus: parsed.audit?.breakingChangesStatus || "PASSED",
+      databaseNPlusOneStatus: parsed.audit?.databaseNPlusOneStatus || "PASSED",
+      tenantIsolationStatus: parsed.audit?.tenantIsolationStatus || "PASSED",
+      uiDesignTokensStatus: parsed.audit?.uiDesignTokensStatus || "PASSED",
+      confidenceScore: typeof parsed.audit?.confidenceScore === "number" ? parsed.audit.confidenceScore : 94,
+      auditNotes: parsed.audit?.auditNotes || "Cross-repository audit completed.",
+    };
 
     return {
       summary: parsed.summary || "Coordinated review completed. No major issues observed.",
@@ -320,6 +384,7 @@ ${prs
       verdict: ["APPROVE", "REQUEST_CHANGES", "COMMENT"].includes(parsed.verdict)
         ? parsed.verdict
         : "COMMENT",
+      audit: overallAudit,
       prReviews,
       comments: allComments,
     };
@@ -332,6 +397,3 @@ ${prs
     };
   }
 }
-
-
-

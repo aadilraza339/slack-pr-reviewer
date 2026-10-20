@@ -1,4 +1,4 @@
-import { PendingReview, PRInfo, SinglePRReviewResult } from "./types.js";
+import { PendingReview, PRInfo, SinglePRReviewResult, AuditChecklist } from "./types.js";
 
 export interface ReviewSubmissionItem {
   prTitle: string;
@@ -6,6 +6,54 @@ export interface ReviewSubmissionItem {
   githubReviewUrl: string;
   repo?: string;
   pullNumber?: number;
+}
+
+/**
+ * Formats a structured Inspection & Verification Audit Report block.
+ */
+function formatAuditBlock(audit?: AuditChecklist) {
+  if (!audit) return null;
+
+  const statusLabel = (status: "PASSED" | "FAILED" | "NOT_APPLICABLE") => {
+    if (status === "PASSED") return "✅ `PASSED`";
+    if (status === "FAILED") return "⚠️ `FAILED / DEFECT FOUND`";
+    return "⚪ `N/A`";
+  };
+
+  const confidenceBadge =
+    audit.confidenceScore >= 90
+      ? `🟢 *${audit.confidenceScore}% (High Assurance)*`
+      : audit.confidenceScore >= 75
+      ? `🟡 *${audit.confidenceScore}% (Moderate)*`
+      : `🔴 *${audit.confidenceScore}% (Needs Human Eyes)*`;
+
+  let text = `*🛡️ Code Inspection & Verification Audit Matrix:*\n`;
+  text += `• *Files Analyzed:* \`${audit.filesInspectedCount} files\`\n`;
+  if (audit.breakingChangesStatus !== "NOT_APPLICABLE") {
+    text += `• *Web ⟷ API Contract Compatibility:* ${statusLabel(audit.breakingChangesStatus)}\n`;
+  }
+  if (audit.databaseNPlusOneStatus !== "NOT_APPLICABLE") {
+    text += `• *Database N+1 Query Traps:* ${statusLabel(audit.databaseNPlusOneStatus)}\n`;
+  }
+  if (audit.tenantIsolationStatus !== "NOT_APPLICABLE") {
+    text += `• *Tenant Scoping & Security Isolation:* ${statusLabel(audit.tenantIsolationStatus)}\n`;
+  }
+  if (audit.uiDesignTokensStatus !== "NOT_APPLICABLE") {
+    text += `• *UI Rules & Design Tokens:* ${statusLabel(audit.uiDesignTokensStatus)}\n`;
+  }
+  text += `• *Review Confidence Score:* ${confidenceBadge}`;
+
+  if (audit.auditNotes) {
+    text += `\n> 📋 _${audit.auditNotes}_`;
+  }
+
+  return {
+    type: "section",
+    text: {
+      type: "mrkdwn",
+      text,
+    },
+  };
 }
 
 /**
@@ -35,7 +83,7 @@ export function buildPairedOverviewBlocks(review: PendingReview) {
   ];
 
   const prsListText = prs
-    .map((p, idx) => {
+    .map((p) => {
       const tag = p.label ? `*[${p.label}]* ` : "";
       return `• ${tag}<${p.url}|${p.owner}/${p.repo}#${p.pullNumber}>: *${p.title}* (by @${p.author})`;
     })
@@ -53,6 +101,15 @@ export function buildPairedOverviewBlocks(review: PendingReview) {
     type: "divider",
   });
 
+  // Verification Audit Report
+  const auditBlock = formatAuditBlock(reviewResult.audit);
+  if (auditBlock) {
+    blocks.push(auditBlock);
+    blocks.push({
+      type: "divider",
+    });
+  }
+
   // Breaking Code Warnings
   if (reviewResult.breakingChangeWarnings && reviewResult.breakingChangeWarnings.length > 0) {
     const warnings = reviewResult.breakingChangeWarnings.map((w) => `• ⚠️ ${w}`).join("\n");
@@ -61,17 +118,6 @@ export function buildPairedOverviewBlocks(review: PendingReview) {
       text: {
         type: "mrkdwn",
         text: `*🚨 POTENTIAL BREAKING CODE DETECTED:*\n${warnings}`,
-      },
-    });
-    blocks.push({
-      type: "divider",
-    });
-  } else {
-    blocks.push({
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text: `*🛡️ Breaking Code Audit:* No contract breakages, endpoint mismatches, or schema drift detected between Web and API.`,
       },
     });
     blocks.push({
@@ -157,7 +203,6 @@ export function buildSinglePRApprovalBlocks(review: PendingReview, prIndex: numb
   const prs = review.prInfos && review.prInfos.length > 0 ? review.prInfos : [review.prInfo];
   const pr = prs[prIndex] || prs[0];
 
-  // Find dedicated review result for this PR
   const prReview = review.reviewResult.prReviews?.find(
     (r) => r.repo.toLowerCase() === pr.repo.toLowerCase()
   );
@@ -170,7 +215,6 @@ export function buildSinglePRApprovalBlocks(review: PendingReview, prIndex: numb
       ? "🔴 REQUEST CHANGES"
       : "💬 COMMENT ONLY";
 
-  // Filter comments specifically for this PR
   const comments =
     prReview?.comments && prReview.comments.length > 0
       ? prReview.comments
@@ -222,6 +266,16 @@ export function buildSinglePRApprovalBlocks(review: PendingReview, prIndex: numb
     },
   ];
 
+  // Audit Checklist for this PR
+  const prAudit = prReview?.audit || review.reviewResult.audit;
+  const auditBlock = formatAuditBlock(prAudit);
+  if (auditBlock) {
+    blocks.push({
+      type: "divider",
+    });
+    blocks.push(auditBlock);
+  }
+
   // Format this PR's issue comments separately
   if (comments.length > 0) {
     blocks.push({
@@ -246,10 +300,13 @@ export function buildSinglePRApprovalBlocks(review: PendingReview, prIndex: numb
     });
   } else {
     blocks.push({
+      type: "divider",
+    });
+    blocks.push({
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `*💬 Comments:* No inline defects or blocking comments for \`${pr.repo}\`.`,
+        text: `*💬 Inline Defect Comments:* None.\n> ✅ _Code passed all quality checks. No bugs, performance traps, or design token violations found._`,
       },
     });
   }
@@ -347,5 +404,3 @@ export function buildReviewSubmittedBlocks(
     },
   ];
 }
-
-

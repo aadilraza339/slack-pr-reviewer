@@ -22,6 +22,16 @@ export interface ReviewComment {
   body: string;
 }
 
+export interface AuditChecklist {
+  filesInspectedCount: number;
+  breakingChangesStatus: "PASSED" | "FAILED" | "NOT_APPLICABLE";
+  databaseNPlusOneStatus: "PASSED" | "FAILED" | "NOT_APPLICABLE";
+  tenantIsolationStatus: "PASSED" | "FAILED" | "NOT_APPLICABLE";
+  uiDesignTokensStatus: "PASSED" | "FAILED" | "NOT_APPLICABLE";
+  confidenceScore: number; // 0 to 100
+  auditNotes?: string;
+}
+
 export interface SinglePRReviewResult {
   repo: string;
   pullNumber: number;
@@ -31,6 +41,7 @@ export interface SinglePRReviewResult {
   label?: string;
   verdict: "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
   summary: string;
+  audit?: AuditChecklist;
   comments: ReviewComment[];
 }
 
@@ -39,6 +50,7 @@ export interface AIReviewResult {
   crossRepoAnalysis?: string;
   breakingChangeWarnings?: string[];
   verdict: "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
+  audit?: AuditChecklist;
   prReviews?: SinglePRReviewResult[];
   comments: ReviewComment[];
 }
