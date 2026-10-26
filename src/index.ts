@@ -3,7 +3,7 @@ import { App, LogLevel } from "@slack/bolt";
 import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { parsePRUrl, parseAllPRUrls, fetchPRDetails, submitGitHubReview } from "./github.js";
-import { generatePRReview, generatePairedPRReview } from "./ai.js";
+import { generatePRReview, generatePairedPRReview, formatErrorMessage } from "./ai.js";
 import {
   buildReviewApprovalBlocks,
   buildPairedOverviewBlocks,
@@ -150,11 +150,25 @@ async function handlePRRequest(text: string, channelId: string, threadTs?: strin
     }
   } catch (error: any) {
     console.error("Error processing PR review:", error);
-    await app.client.chat.postMessage({
-      channel: channelId,
-      thread_ts: threadTs,
-      text: `❌ Could not generate review for PR: ${error.message || "Unknown error"}`,
-    });
+    const friendlyError = formatErrorMessage(error);
+    const errorText = `❌ *Could not generate review for PR:*\n> ${friendlyError}`;
+
+    if (channelId) {
+      await app.client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        text: errorText,
+      });
+    }
+
+    const reviewerUserId = process.env.SLACK_REVIEWER_USER_ID;
+    const isDirectDMWithReviewer = channelId.startsWith("D") && (!requestedBy || requestedBy === reviewerUserId);
+    if (reviewerUserId && reviewerUserId !== channelId && !isDirectDMWithReviewer) {
+      await app.client.chat.postMessage({
+        channel: reviewerUserId,
+        text: errorText,
+      });
+    }
   }
 }
 
@@ -256,7 +270,7 @@ app.action("btn_approve_single", async ({ action, ack, respond }) => {
   } catch (error: any) {
     console.error(`Error submitting review for ${pr.repo}:`, error);
     await respond({
-      text: `❌ Error submitting review for ${pr.repo}: ${error.message}`,
+      text: `❌ Error submitting review for ${pr.repo}: ${formatErrorMessage(error)}`,
       replace_original: false,
     });
   }
@@ -327,7 +341,7 @@ app.action("btn_comment_single", async ({ action, ack, respond }) => {
   } catch (error: any) {
     console.error(`Error submitting comments for ${pr.repo}:`, error);
     await respond({
-      text: `❌ Error submitting comments for ${pr.repo}: ${error.message}`,
+      text: `❌ Error submitting comments for ${pr.repo}: ${formatErrorMessage(error)}`,
       replace_original: false,
     });
   }
@@ -427,7 +441,7 @@ app.action("btn_approve_review", async ({ action, ack, respond, body }) => {
   } catch (error: any) {
     console.error("Error submitting review to GitHub:", error);
     await respond({
-      text: `❌ Error submitting review to GitHub: ${error.message}`,
+      text: `❌ Error submitting review to GitHub: ${formatErrorMessage(error)}`,
       replace_original: false,
     });
   }
@@ -505,7 +519,7 @@ app.action("btn_comment_review", async ({ action, ack, respond }) => {
   } catch (error: any) {
     console.error("Error submitting comments to GitHub:", error);
     await respond({
-      text: `❌ Error submitting comments to GitHub: ${error.message}`,
+      text: `❌ Error submitting comments to GitHub: ${formatErrorMessage(error)}`,
       replace_original: false,
     });
   }

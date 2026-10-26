@@ -16,15 +16,47 @@ const CANDIDATE_MODELS = Array.from(
     [
       process.env.GEMINI_MODEL,
       "gemini-3.8-flash",
-      "gemini-2.5-flash",
-      "gemini-2.0-flash",
+      "gemini-3.5-flash",
+      "gemini-flash-latest",
     ].filter(Boolean) as string[]
   )
 );
 
+export function formatErrorMessage(error: any): string {
+  const rawMsg = error?.message || String(error || "Unknown error");
+  try {
+    const parsed = typeof rawMsg === "string" ? JSON.parse(rawMsg) : rawMsg;
+    if (parsed?.error?.message) {
+      const code = parsed.error.code ? `[Error ${parsed.error.code}] ` : "";
+      return `${code}${parsed.error.message}`;
+    }
+  } catch {}
+  return rawMsg;
+}
+
+function cleanJsonText(text: string): string {
+  let cleaned = text.trim();
+  if (cleaned.startsWith("```json")) {
+    cleaned = cleaned.replace(/^```json\s*/i, "").replace(/\s*```$/, "").trim();
+  } else if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "").trim();
+  }
+  return cleaned;
+}
+
 function isTransientError(error: any): boolean {
-  const code = error?.code || error?.status || error?.error?.code;
+  let code = error?.code || error?.status || error?.error?.code;
   const message = String(error?.message || error || "").toLowerCase();
+
+  try {
+    const parsed = typeof error?.message === "string" ? JSON.parse(error.message) : error?.message;
+    if (parsed?.error?.code) code = parsed.error.code;
+    if (parsed?.error?.status) {
+      const s = String(parsed.error.status).toUpperCase();
+      if (s === "UNAVAILABLE" || s === "RESOURCE_EXHAUSTED") return true;
+    }
+  } catch {}
+
   return (
     code === 503 ||
     code === 429 ||
@@ -178,7 +210,12 @@ Respond ONLY with valid JSON strictly adhering to this schema:
 
   try {
     const responseText = await generateReviewWithFallback(prompt);
-    const parsed = JSON.parse(responseText);
+    const cleanedText = cleanJsonText(responseText);
+    const parsed = JSON.parse(cleanedText);
+
+    if (parsed.error) {
+      throw new Error(parsed.error.message || JSON.stringify(parsed.error));
+    }
 
     const rawComments = Array.isArray(parsed.comments) ? parsed.comments : [];
     const comments = sanitizeReviewComments(rawComments);
@@ -203,11 +240,7 @@ Respond ONLY with valid JSON strictly adhering to this schema:
     };
   } catch (error: any) {
     console.error("Gemini API Review Error:", error);
-    return {
-      summary: `Automated review failed to parse: ${error.message || "Unknown error"}`,
-      verdict: "COMMENT",
-      comments: [],
-    };
+    throw error;
   }
 }
 
@@ -323,7 +356,12 @@ ${prs
 
   try {
     const responseText = await generateReviewWithFallback(prompt);
-    const parsed = JSON.parse(responseText);
+    const cleanedText = cleanJsonText(responseText);
+    const parsed = JSON.parse(cleanedText);
+
+    if (parsed.error) {
+      throw new Error(parsed.error.message || JSON.stringify(parsed.error));
+    }
 
     const prReviews: SinglePRReviewResult[] = [];
     const allComments: ReviewComment[] = [];
@@ -390,10 +428,6 @@ ${prs
     };
   } catch (error: any) {
     console.error("Gemini Paired Review Error:", error);
-    return {
-      summary: `Automated paired review failed to parse: ${error.message || "Unknown error"}`,
-      verdict: "COMMENT",
-      comments: [],
-    };
+    throw error;
   }
 }

@@ -1,6 +1,6 @@
 # 🤖 Slack AI PR Reviewer (Human-in-the-Loop)
 
-An automated PR review bot that listens to Slack mentions/messages, analyzes GitHub Pull Requests using **Google Gemini 2.5 Flash**, drafts structured inline comments, and sends them to **you** in Slack for one-click approval before publishing directly to GitHub **under your personal account**.
+An automated PR review bot that listens to Slack mentions/messages, analyzes GitHub Pull Requests using **Google Gemini 3.8 Flash**, drafts structured inline comments, and sends them to **you** in Slack for one-click approval before publishing directly to GitHub **under your personal account**.
 
 ---
 
