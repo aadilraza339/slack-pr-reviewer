@@ -3,6 +3,7 @@ import { App, LogLevel } from "@slack/bolt";
 import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { parsePRUrl, parseAllPRUrls, fetchPRDetails, submitGitHubReview } from "./github.js";
+import { ensureGitHubAuth } from "./githubAuth.js";
 import { generatePRReview, generatePairedPRReview, formatErrorMessage } from "./ai.js";
 import {
   buildReviewApprovalBlocks,
@@ -19,7 +20,6 @@ const requiredEnvVars = [
   "SLACK_APP_TOKEN",
   "SLACK_SIGNING_SECRET",
   "SLACK_REVIEWER_USER_ID",
-  "GITHUB_PERSONAL_ACCESS_TOKEN",
   "GEMINI_API_KEY",
 ];
 
@@ -567,6 +567,13 @@ const healthServer = http.createServer((req, res) => {
   healthServer.listen(port, "0.0.0.0", () => {
     console.log(`🩺 Health check endpoint listening on http://0.0.0.0:${port}/health`);
   });
+
+  try {
+    await ensureGitHubAuth();
+  } catch (error: any) {
+    console.error(`❌ ${error?.message || error}`);
+    process.exit(1);
+  }
 
   // Start Slack Socket Mode client
   await app.start();

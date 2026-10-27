@@ -1,8 +1,5 @@
-import { Octokit } from "@octokit/rest";
 import { PRInfo, ReviewComment } from "./types.js";
-
-const GITHUB_TOKEN = process.env.GITHUB_PERSONAL_ACCESS_TOKEN || "";
-const octokit = new Octokit({ auth: GITHUB_TOKEN });
+import { getOctokit } from "./githubAuth.js";
 
 export interface ParsedPRReference {
   owner: string;
@@ -108,6 +105,7 @@ export async function fetchPRDetails(
   pullNumber: number,
   label?: string
 ): Promise<PRInfo> {
+  const octokit = await getOctokit();
   const { data: pr } = await octokit.pulls.get({
     owner,
     repo,
@@ -155,6 +153,7 @@ export async function submitGitHubReview(
   summary: string,
   comments: ReviewComment[]
 ): Promise<string> {
+  const octokit = await getOctokit();
   // Format overall review body
   let reviewBody = summary;
 

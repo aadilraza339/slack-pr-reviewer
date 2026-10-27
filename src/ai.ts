@@ -4,7 +4,10 @@ import {
   CORE_REVIEW_PRINCIPLES,
   CROSS_REPO_BREAKING_RULES,
   FRONTEND_UI_RULES,
+  FRONTEND_MANDATORY_AUDIT,
   BACKEND_API_RULES,
+  isFrontendRepo,
+  isBackendRepo,
 } from "./reviewRules.js";
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
@@ -145,8 +148,8 @@ function sanitizeReviewComments(comments: ReviewComment[]): ReviewComment[] {
 }
 
 export async function generatePRReview(pr: PRInfo): Promise<AIReviewResult> {
-  const isWeb = /web|front/i.test(pr.repo);
-  const isApi = /api|back|srv/i.test(pr.repo);
+  const isWeb = isFrontendRepo(pr.repo);
+  const isApi = isBackendRepo(pr.repo);
 
   const diffs = pr.files
     .filter((f) => f.patch)
@@ -176,14 +179,17 @@ Here is the diff of the changes:
 ${diffs || "No patch diff available (e.g. only file creations or binary files)."}
 
 Mandatory Audit Steps:
-1. **Database N+1 Query Trap Check**:
+1. **Database N+1 Query Trap Check** (backend / full-stack PRs):
    - Explicitly search for ANY database query (\`await tx.update\`, \`await tx.select\`, \`await tx.insert\`, \`await db...\`) running inside a loop (\`for\`, \`for...of\`, \`for...in\`, \`.map()\`, \`forEach()\`).
    - If found, mark \`databaseNPlusOneStatus: "FAILED"\`, flag the line with an inline comment, and provide the batched query fix.
-2. **Tenant Isolation Check**:
+   - For frontend-only PRs with no DB code, use \`databaseNPlusOneStatus: "NOT_APPLICABLE"\`.
+2. **Tenant Isolation Check** (backend):
    - Ensure every database query and mutation has an explicit \`eq(table.tenant, user.tenant)\` filter.
+   - For frontend-only PRs, verify TanStack Query keys/params include tenant where applicable; otherwise \`tenantIsolationStatus: "NOT_APPLICABLE"\` if no data layer changes.
 3. **Zero-Fluff Mandate**:
    - Do NOT write complimentary comments like "Great addition" or "Looks clean".
    - If there are no bugs, security flaws, or architectural violations, \`comments\` MUST be an empty array \`[]\`.
+${isWeb ? FRONTEND_MANDATORY_AUDIT : ""}
 
 Respond ONLY with valid JSON strictly adhering to this schema:
 {
@@ -301,7 +307,10 @@ Review Requirements:
 3. **STRICT ZERO-FLUFF MANDATE**:
    - NEVER praise or compliment the code (no "great addition", "looks clean", "well handled").
    - If a PR has no bugs or violations, its \`comments\` array MUST BE EMPTY: \`[]\`.
-4. **Dedicated Review per Repository**:
+4. **Frontend STE & Architecture (Web PR in pair)**:
+   - Apply PeopleFirst Web rules only to the Web repository diff. Cross-check STE categories from touched files; cite guideline \`id\` on findings.
+   - Block \`src/components/ui/\` edits, stack fast-breakers, and common UI regressions (loaders, \`window.confirm\`, wrong tokens).
+5. **Dedicated Review per Repository**:
    - Provide a separate review object in "prReviews" for EACH repository.
 
 Respond ONLY with valid JSON strictly adhering to this schema:

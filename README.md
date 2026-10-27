@@ -15,7 +15,7 @@ An automated PR review bot that listens to Slack mentions/messages, analyzes Git
    - **`[✅ Approve & Post to GitHub]`**
    - **`[💬 Post Comments Only]`**
    - **`[❌ Discard]`**
-4. **Publish Under Your Name**: When you click approve, the bot calls the GitHub REST API using **your personal access token**. The review and all inline comments appear on GitHub authored by **you**.
+4. **Publish Under Your Name**: When you click approve, the bot calls the GitHub REST API using **your GitHub identity** (GitHub CLI login or a personal access token). The review and all inline comments appear on GitHub authored by **you**.
 5. **Thread Notification**: The bot posts back to the original Slack thread with a direct link to the published review.
 
 ---
@@ -39,13 +39,26 @@ cp .env.example .env
 
 ---
 
-### Step 3: Create a GitHub Personal Access Token
-To have comments post on GitHub under **your name**:
-1. Go to [GitHub Settings > Personal Access Tokens (Classic)](https://github.com/settings/tokens).
-2. Click **"Generate new token (classic)"**.
-3. Set Note to `Slack PR Reviewer`.
-4. Check the **`repo`** scope (Full control of private repositories).
-5. Copy the generated token (`ghp_...`) and paste it in `.env` as `GITHUB_PERSONAL_ACCESS_TOKEN`.
+### Step 3: GitHub authentication (recommended: GitHub CLI)
+
+Reviews are posted under **your** GitHub user. You do not need a PAT in `.env` if you use the CLI.
+
+**Option A — GitHub CLI (recommended, ~50 MB install)**
+
+```bash
+brew install gh   # macOS; see https://cli.github.com/ for other platforms
+gh auth login     # choose GitHub.com, HTTPS, login via browser; grant repo access
+gh auth status    # should show "Logged in to github.com"
+```
+
+The bot reads your session via `gh auth token` at startup. No `ghp_...` string in `.env`, and tokens stay in the OS keychain.
+
+**Option B — Personal access token (CI / servers without `gh`)**
+
+1. [Generate a classic PAT](https://github.com/settings/tokens) with **`repo`** scope.
+2. Set `GITHUB_PERSONAL_ACCESS_TOKEN=ghp_...` in `.env`.
+
+Env token wins if both are set.
 
 ---
 
