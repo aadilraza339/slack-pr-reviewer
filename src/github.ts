@@ -1,5 +1,7 @@
 import { PRInfo, ReviewComment } from "./types.js";
 import { getOctokit } from "./githubAuth.js";
+import { ghApiPost, isGhCliInstalled } from "./githubCli.js";
+import { buildPullRequestReviewPayload, cleanReviewMarkdown } from "./reviewMarkdown.js";
 
 export interface ParsedPRReference {
   owner: string;
@@ -145,6 +147,38 @@ export async function fetchPRDetails(
 /**
  * Submits the final review to GitHub under YOUR personal identity.
  */
+async function createPullRequestReview(
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  payload: ReturnType<typeof buildPullRequestReviewPayload>
+): Promise<string> {
+  const endpoint = `repos/${owner}/${repo}/pulls/${pullNumber}/reviews`;
+
+  if (await isGhCliInstalled()) {
+    try {
+      const review = await ghApiPost<{ html_url?: string }>(endpoint, payload);
+      if (review.html_url) {
+        console.log(`[GitHub] Posted review via gh api (JSON payload, ${payload.comments?.length ?? 0} inline comments)`);
+        return review.html_url;
+      }
+    } catch (error: any) {
+      console.warn("[GitHub] gh api review failed, falling back to Octokit:", error.message);
+    }
+  }
+
+  const octokit = await getOctokit();
+  const { data: review } = await octokit.pulls.createReview({
+    owner,
+    repo,
+    pull_number: pullNumber,
+    event: payload.event,
+    body: payload.body,
+    comments: payload.comments,
+  });
+  return review.html_url;
+}
+
 export async function submitGitHubReview(
   owner: string,
   repo: string,
@@ -153,47 +187,20 @@ export async function submitGitHubReview(
   summary: string,
   comments: ReviewComment[]
 ): Promise<string> {
-  const octokit = await getOctokit();
-  // Format overall review body
-  let reviewBody = summary;
-
-  // Format valid inline comments
-  const formattedComments = comments
-    .filter((c) => c.path && c.line && c.body)
-    .map((c) => ({
-      path: c.path,
-      line: c.line,
-      side: "RIGHT" as const,
-      body: c.body,
-    }));
+  const payload = buildPullRequestReviewPayload(event, summary, comments);
 
   try {
-    const { data: review } = await octokit.pulls.createReview({
-      owner,
-      repo,
-      pull_number: pullNumber,
-      event,
-      body: reviewBody,
-      comments: formattedComments,
-    });
-    return review.html_url;
+    return await createPullRequestReview(owner, repo, pullNumber, payload);
   } catch (error: any) {
-    // If GitHub rejects batch inline comments due to line number diff mismatch,
-    // fallback to posting the summary with inline comments appended as markdown
-    console.warn("Batch inline comment failed, falling back to summary review:", error.message);
+    console.warn("Batch inline comment failed, falling back to summary-only review:", error.message);
 
-    let fallbackBody = reviewBody + "\n\n### 💬 Detailed Comments:\n";
-    for (const c of comments) {
-      fallbackBody += `\n- **\`${c.path}:${c.line}\`**: ${c.body}`;
+    let fallbackBody =
+      payload.body + "\n\n### 💬 Detailed Comments:\n";
+    for (const c of comments.filter((x) => x.path && x.line && x.body)) {
+      fallbackBody += `\n- **\`${c.path}:${c.line}\`**: ${cleanReviewMarkdown(c.body, 4_000)}`;
     }
 
-    const { data: review } = await octokit.pulls.createReview({
-      owner,
-      repo,
-      pull_number: pullNumber,
-      event,
-      body: fallbackBody,
-    });
-    return review.html_url;
+    const fallbackPayload = buildPullRequestReviewPayload(event, fallbackBody, []);
+    return await createPullRequestReview(owner, repo, pullNumber, fallbackPayload);
   }
 }

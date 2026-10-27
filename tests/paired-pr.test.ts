@@ -1,4 +1,5 @@
 import { parseAllPRUrls } from "../src/github.js";
+import { buildPullRequestReviewPayload, cleanReviewMarkdown } from "../src/reviewMarkdown.js";
 import {
   buildReviewApprovalBlocks,
   buildPairedOverviewBlocks,
@@ -152,6 +153,19 @@ api: https://github.com/wysbryxtech/peoplefirst-api/pull/2925
     throw new Error("Submitted blocks failed to generate");
   }
   console.log("✓ Test 3: Slack block generation for paired reviews and separate per-PR issue comments verified.");
+
+  const cleaned = cleanReviewMarkdown("  hello\r\n\r\n\n\n\nworld ```broken");
+  if (!cleaned.includes("hello") || cleaned.includes("\r")) {
+    throw new Error(`Markdown clean failed: ${JSON.stringify(cleaned)}`);
+  }
+
+  const payload = buildPullRequestReviewPayload("COMMENT", "## Summary", [
+    { path: "src/a.ts", line: 10, body: "Fix **this**" },
+  ]);
+  if (payload.event !== "COMMENT" || payload.comments?.length !== 1 || payload.comments[0].side !== "RIGHT") {
+    throw new Error(`Review JSON payload invalid: ${JSON.stringify(payload)}`);
+  }
+  console.log("✓ Test 4: Review markdown cleaning and JSON payload shape verified.");
 
   console.log("\nALL TESTS PASSED SUCCESSFULLY! 🎉");
 }

@@ -60,6 +60,8 @@ The bot reads your session via `gh auth token` at startup. No `ghp_...` string i
 
 Env token wins if both are set.
 
+When **`gh`** is installed, approved reviews are posted with `gh api repos/.../pulls/.../reviews --input` and a JSON body (`event`, `body`, `comments[]`)—same approach as scripting reviews by hand. Comment text is normalized before send; if inline lines fail validation, the bot falls back to a summary-only review with comments in the body.
+
 ---
 
 ### Step 4: Create & Configure the Slack App
