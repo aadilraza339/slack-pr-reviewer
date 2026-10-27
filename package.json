@@ -7,7 +7,10 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "tsx src/index.ts",
-    "start:prod": "node dist/index.js"
+    "start:prod": "node dist/index.js",
+    "pr:context": "tsx scripts/pr-review-check.ts --context",
+    "pr:ci": "PR_REVIEW_RUN_CI=true tsx scripts/pr-review-check.ts --ci",
+    "pr:check": "PR_REVIEW_RUN_CI=true tsx scripts/pr-review-check.ts --context --ci"
   },
   "dependencies": {
     "@google/genai": "^2.30.0",

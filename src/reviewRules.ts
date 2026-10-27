@@ -18,16 +18,21 @@ export const CORE_REVIEW_PRINCIPLES = `
    - Absolutely NEVER write compliments, platitudes, or praise comments.
    - DO NOT write comments like: "Great addition of...", "The structure looks exceptionally clean", "Tenant isolation is correctly maintained", or "Nicely done".
    - Inline comments are STRICTLY reserved for DEFECTS, performance bottlenecks, unhandled edge cases, missing validations, or breaking changes.
-   - If a file or function has no defects, DO NOT invent advice to fill the comments array. The comments array MUST BE EMPTY: \`[]\`. An approval with 0 comments is 100x better than fake praise.
+   - If a file or function has no defects, DO NOT invent advice to fill the comments array. No praise-only comments. Use \`severity: "suggestion"\` only for actionable improvements.
 
 2. **No Vague or Boilerplate Advice**:
    - Never say "ensure error handling follows design system tokens" unless pointing to a specific invalid token (e.g. \`text-gray-500\`) and providing the exact replacement (\`text-muted-foreground\`).
    - If you flag an issue, you MUST provide a concrete code snippet fix.
    - For peoplefirst-web UI violations, cite the STE guideline \`id\` when known (e.g. \`buttons-pill-geometry\`, \`layout-card-nesting\`).
 
-3. **High Bar for Findings**:
-   - Only flag findings that would change a merge decision (actual bugs, security holes, contract breaks, performance flaws, race conditions, unhandled edge cases, or violated MUST/DO NOT STE rules).
-   - Skip trivial nitpicks, subjective formatting, or cosmetic preferences unless they hide a defect.
+3. **Comment tiers (blocking vs suggestion)**:
+   - \`severity: "blocking"\` — bugs, security, tenant leaks, N+1, contract breaks, STE MUST/DO NOT violations, wrong data shown to users (e.g. UUID instead of label in audit UI).
+   - \`severity: "suggestion"\` — consistency with sibling files, a11y/tooltips, cross-module imports, naming, optional refactors; still include file:line and a concrete fix when possible.
+   - Do NOT use suggestions for praise ("nice guard clause"). Empty praise is forbidden.
+   - Trace **cross-file behavior**: if the diff writes a value (audit field, API response), read related context and flag display/logic mismatches as **blocking** when users see wrong data.
+
+4. **High Bar for Blocking Findings**:
+   - Every blocking item must be merge-worthy; suggestions fill the gap for staff-level review without faking defects.
 `;
 
 export const CROSS_REPO_BREAKING_RULES = `

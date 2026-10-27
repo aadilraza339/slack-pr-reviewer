@@ -2,6 +2,8 @@ import { PRInfo, ReviewComment } from "./types.js";
 import { getOctokit } from "./githubAuth.js";
 import { ghApiPost, isGhCliInstalled } from "./githubCli.js";
 import { buildPullRequestReviewPayload, cleanReviewMarkdown } from "./reviewMarkdown.js";
+import { formatCommentBodyForGitHub } from "./reviewCommentUtils.js";
+import { listAllPullRequestFiles, fetchRelatedSourceContext } from "./githubContext.js";
 
 export interface ParsedPRReference {
   owner: string;
@@ -114,22 +116,26 @@ export async function fetchPRDetails(
     pull_number: pullNumber,
   });
 
-  const { data: files } = await octokit.pulls.listFiles({
-    owner,
-    repo,
-    pull_number: pullNumber,
-    per_page: 50,
-  });
+  const relevantFiles = await listAllPullRequestFiles(owner, repo, pullNumber);
+  const headRef = pr.head.sha;
 
-  // Filter out lock files or binary files to keep tokens clean
-  const relevantFiles = files
-    .filter((f) => !f.filename.endsWith(".lock") && !f.filename.endsWith("-lock.json"))
-    .map((f) => ({
-      filename: f.filename,
-      patch: f.patch,
-      additions: f.additions,
-      deletions: f.deletions,
-    }));
+  const relatedContext = await fetchRelatedSourceContext(owner, repo, headRef, relevantFiles);
+
+  if (relatedContext.length > 0) {
+    console.log(
+      `[GitHub] ${owner}/${repo}#${pullNumber}: loaded ${relatedContext.length} related context file(s) for cross-file review`
+    );
+  }
+
+  const missingPatch = relevantFiles.filter((f) => !f.patch && f.additions + f.deletions > 0);
+  if (missingPatch.length > 0) {
+    console.warn(
+      `[GitHub] ${missingPatch.length} changed file(s) have no patch (size limit): ${missingPatch
+        .map((f) => f.filename)
+        .slice(0, 5)
+        .join(", ")}${missingPatch.length > 5 ? "…" : ""}`
+    );
+  }
 
   return {
     owner,
@@ -141,6 +147,8 @@ export async function fetchPRDetails(
     author: pr.user.login,
     label: label || (/web|front/i.test(repo) ? "Web / Frontend" : /api|back|srv/i.test(repo) ? "API / Backend" : undefined),
     files: relevantFiles,
+    relatedContext,
+    headRef,
   };
 }
 
@@ -187,7 +195,17 @@ export async function submitGitHubReview(
   summary: string,
   comments: ReviewComment[]
 ): Promise<string> {
-  const payload = buildPullRequestReviewPayload(event, summary, comments);
+  const payload = buildPullRequestReviewPayload(
+    event,
+    summary,
+    comments
+      .filter((c) => c.path && c.line && c.body)
+      .map((c) => ({
+        path: c.path,
+        line: c.line,
+        body: formatCommentBodyForGitHub(c),
+      }))
+  );
 
   try {
     return await createPullRequestReview(owner, repo, pullNumber, payload);

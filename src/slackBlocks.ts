@@ -1,4 +1,5 @@
 import { PendingReview, PRInfo, SinglePRReviewResult, AuditChecklist } from "./types.js";
+import { partitionComments } from "./reviewCommentUtils.js";
 
 export interface ReviewSubmissionItem {
   prTitle: string;
@@ -276,37 +277,35 @@ export function buildSinglePRApprovalBlocks(review: PendingReview, prIndex: numb
     blocks.push(auditBlock);
   }
 
-  // Format this PR's issue comments separately
-  if (comments.length > 0) {
-    blocks.push({
-      type: "divider",
-    });
+  const { blocking, suggestions } = partitionComments(comments);
 
-    let commentsText = `*💬 Issue Comments for \`${pr.repo}\` (${comments.length}):*\n`;
-    for (const [index, c] of comments.entries()) {
-      commentsText += `\n*${index + 1}. \`${c.path}:${c.line}\`*\n> ${c.body.replace(/\n/g, "\n> ")}\n`;
+  blocks.push({ type: "divider" });
+
+  if (blocking.length > 0) {
+    let blockingText = `*🔴 Blocking (${blocking.length}) — merge defects:*\n`;
+    for (const [index, c] of blocking.entries()) {
+      blockingText += `\n*${index + 1}. \`${c.path}:${c.line}\`*\n> ${c.body.replace(/\n/g, "\n> ")}\n`;
     }
+    if (blockingText.length > 2900) blockingText = blockingText.slice(0, 2800) + "\n\n_…truncated._";
+    blocks.push({ type: "section", text: { type: "mrkdwn", text: blockingText } });
+  }
 
-    if (commentsText.length > 2900) {
-      commentsText = commentsText.slice(0, 2800) + "\n\n_...comments truncated due to length._";
+  if (suggestions.length > 0) {
+    blocks.push({ type: "divider" });
+    let sugText = `*💡 Suggestions (${suggestions.length}) — consistency / a11y / architecture:*\n`;
+    for (const [index, c] of suggestions.entries()) {
+      sugText += `\n*${index + 1}. \`${c.path}:${c.line}\`*\n> ${c.body.replace(/\n/g, "\n> ")}\n`;
     }
+    if (sugText.length > 2900) sugText = sugText.slice(0, 2800) + "\n\n_…truncated._";
+    blocks.push({ type: "section", text: { type: "mrkdwn", text: sugText } });
+  }
 
+  if (blocking.length === 0 && suggestions.length === 0) {
     blocks.push({
       type: "section",
       text: {
         type: "mrkdwn",
-        text: commentsText,
-      },
-    });
-  } else {
-    blocks.push({
-      type: "divider",
-    });
-    blocks.push({
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text: `*💬 Inline Defect Comments:* None.\n> ✅ _Code passed all quality checks. No bugs, performance traps, or design token violations found._`,
+        text: `*💬 Inline Comments:* None.\n> ✅ _No blocking defects or suggestions from the deep review pass._`,
       },
     });
   }

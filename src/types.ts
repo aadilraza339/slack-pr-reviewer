@@ -13,13 +13,29 @@ export interface PRInfo {
     additions: number;
     deletions: number;
   }>;
+  /** Full files pulled for cross-file reasoning (imports), not counted as PR diff files. */
+  relatedContext?: Array<{
+    filename: string;
+    reason: string;
+    content: string;
+  }>;
+  headRef?: string;
+  ciCheck?: {
+    status: "passed" | "failed" | "skipped" | "error";
+    commandsRun: string[];
+    log: string;
+  };
 }
+
+export type ReviewCommentSeverity = "blocking" | "suggestion";
 
 export interface ReviewComment {
   repo?: string; // target repository in multi-PR reviews
   path: string;
   line: number;
   body: string;
+  /** blocking = merge defect; suggestion = consistency, a11y, architecture (Viswesh-style). */
+  severity?: ReviewCommentSeverity;
 }
 
 export interface AuditChecklist {

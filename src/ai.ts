@@ -9,6 +9,10 @@ import {
   isFrontendRepo,
   isBackendRepo,
 } from "./reviewRules.js";
+import {
+  normalizeCommentSeverity,
+  computeVerdictFromComments,
+} from "./reviewCommentUtils.js";
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
@@ -135,26 +139,93 @@ function sanitizeReviewComments(comments: ReviewComment[]): ReviewComment[] {
     "to ensure consistency with other",
   ];
 
-  return comments.filter((c) => {
-    if (!c.body || !c.path || !c.line) return false;
-    const lower = c.body.toLowerCase();
-    const isFluff = fluffKeywords.some((phrase) => lower.includes(phrase)) && !c.body.includes("```");
-    if (isFluff) {
-      console.log(`[Sanitizer] Removed sycophantic comment on ${c.path}:${c.line}: "${c.body.slice(0, 50)}..."`);
-      return false;
-    }
-    return true;
-  });
+  return comments
+    .filter((c) => {
+      if (!c.body || !c.path || !c.line) return false;
+      const lower = c.body.toLowerCase();
+      const isFluff = fluffKeywords.some((phrase) => lower.includes(phrase)) && !c.body.includes("```");
+      if (isFluff) {
+        console.log(`[Sanitizer] Removed sycophantic comment on ${c.path}:${c.line}: "${c.body.slice(0, 50)}..."`);
+        return false;
+      }
+      return true;
+    })
+    .map((c) => ({
+      ...c,
+      severity: normalizeCommentSeverity(c.severity),
+    }));
 }
+
+function formatDiffsForPrompt(pr: PRInfo): string {
+  const diffs = pr.files
+    .filter((f) => f.patch)
+    .map((f) => `### File: ${f.filename}\n\`\`\`diff\n${f.patch}\n\`\`\``)
+    .join("\n\n");
+
+  let related = "";
+  if (pr.relatedContext && pr.relatedContext.length > 0) {
+    related =
+      "\n\n### Related source context (NOT part of the diff — use for cross-file bugs)\n" +
+      pr.relatedContext
+        .map(
+          (r) =>
+            `#### ${r.filename} (${r.reason})\n\`\`\`typescript\n${r.content}\n\`\`\``
+        )
+        .join("\n\n");
+  }
+
+  let ci = "";
+  if (pr.ciCheck && pr.ciCheck.status !== "skipped") {
+    ci = `\n\n### CI on PR head (${pr.ciCheck.status})\nCommands: ${pr.ciCheck.commandsRun.join(" → ") || "none"}\nIf CI failed, treat build/test failures as **blocking** unless clearly flaky.\n\`\`\`\n${pr.ciCheck.log.slice(-3500)}\n\`\`\``;
+  }
+
+  return (diffs || "No patch diff available (e.g. only file creations or binary files).") + related + ci;
+}
+
+function toSinglePRReviewResult(pr: PRInfo, parsed: any, comments: ReviewComment[]): SinglePRReviewResult {
+  const audit: AuditChecklist = {
+    filesInspectedCount: pr.files.length,
+    breakingChangesStatus: parsed.audit?.breakingChangesStatus || "NOT_APPLICABLE",
+    databaseNPlusOneStatus: parsed.audit?.databaseNPlusOneStatus || "NOT_APPLICABLE",
+    tenantIsolationStatus: parsed.audit?.tenantIsolationStatus || "NOT_APPLICABLE",
+    uiDesignTokensStatus: parsed.audit?.uiDesignTokensStatus || "NOT_APPLICABLE",
+    confidenceScore: typeof parsed.audit?.confidenceScore === "number" ? parsed.audit.confidenceScore : 90,
+    auditNotes: parsed.audit?.auditNotes || "Full audit checklist completed.",
+  };
+
+  const modelVerdict = ["APPROVE", "REQUEST_CHANGES", "COMMENT"].includes(parsed.verdict)
+    ? parsed.verdict
+    : "COMMENT";
+
+  return {
+    repo: pr.repo,
+    pullNumber: pr.pullNumber,
+    title: pr.title,
+    url: pr.url,
+    author: pr.author,
+    label: pr.label,
+    verdict: computeVerdictFromComments(comments, modelVerdict),
+    summary: parsed.summary || "Review completed.",
+    audit,
+    comments,
+  };
+}
+
+const COMMENT_JSON_SCHEMA = `
+  "comments": [
+    {
+      "path": "path/to/file.ts",
+      "line": 42,
+      "severity": "blocking" | "suggestion",
+      "body": "Exact issue with markdown code fix. Use blocking for bugs/security/contract/wrong UX data; suggestion for consistency/a11y/architecture."
+    }
+  ]`;
 
 export async function generatePRReview(pr: PRInfo): Promise<AIReviewResult> {
   const isWeb = isFrontendRepo(pr.repo);
   const isApi = isBackendRepo(pr.repo);
 
-  const diffs = pr.files
-    .filter((f) => f.patch)
-    .map((f) => `### File: ${f.filename}\n\`\`\`diff\n${f.patch}\n\`\`\``)
-    .join("\n\n");
+  const diffs = formatDiffsForPrompt(pr);
 
   const specificRules = isWeb
     ? FRONTEND_UI_RULES
@@ -188,7 +259,8 @@ Mandatory Audit Steps:
    - For frontend-only PRs, verify TanStack Query keys/params include tenant where applicable; otherwise \`tenantIsolationStatus: "NOT_APPLICABLE"\` if no data layer changes.
 3. **Zero-Fluff Mandate**:
    - Do NOT write complimentary comments like "Great addition" or "Looks clean".
-   - If there are no bugs, security flaws, or architectural violations, \`comments\` MUST be an empty array \`[]\`.
+   - If there are no blocking bugs and no actionable suggestions, \`comments\` MAY be \`[]\`.
+   - Use **Related source context** to find cross-file defects (audit/history/display mismatches).
 ${isWeb ? FRONTEND_MANDATORY_AUDIT : ""}
 
 Respond ONLY with valid JSON strictly adhering to this schema:
@@ -204,13 +276,7 @@ Respond ONLY with valid JSON strictly adhering to this schema:
     "confidenceScore": 95,
     "auditNotes": "Brief bulleted verification notes on checks executed"
   },
-  "comments": [
-    {
-      "path": "path/to/file.ts",
-      "line": 42,
-      "body": "Exact issue description with markdown code replacement snippet..."
-    }
-  ]
+${COMMENT_JSON_SCHEMA}
 }
 `;
 
@@ -225,24 +291,14 @@ Respond ONLY with valid JSON strictly adhering to this schema:
 
     const rawComments = Array.isArray(parsed.comments) ? parsed.comments : [];
     const comments = sanitizeReviewComments(rawComments);
-
-    const audit: AuditChecklist = {
-      filesInspectedCount: pr.files.length,
-      breakingChangesStatus: parsed.audit?.breakingChangesStatus || "NOT_APPLICABLE",
-      databaseNPlusOneStatus: parsed.audit?.databaseNPlusOneStatus || "NOT_APPLICABLE",
-      tenantIsolationStatus: parsed.audit?.tenantIsolationStatus || "NOT_APPLICABLE",
-      uiDesignTokensStatus: parsed.audit?.uiDesignTokensStatus || "NOT_APPLICABLE",
-      confidenceScore: typeof parsed.audit?.confidenceScore === "number" ? parsed.audit.confidenceScore : 90,
-      auditNotes: parsed.audit?.auditNotes || "Full audit checklist completed.",
-    };
+    const single = toSinglePRReviewResult(pr, parsed, comments);
 
     return {
-      summary: parsed.summary || "Review completed. No major issues observed.",
-      verdict: ["APPROVE", "REQUEST_CHANGES", "COMMENT"].includes(parsed.verdict)
-        ? parsed.verdict
-        : "COMMENT",
-      audit,
+      summary: single.summary,
+      verdict: single.verdict,
+      audit: single.audit,
       comments,
+      prReviews: [single],
     };
   } catch (error: any) {
     console.error("Gemini API Review Error:", error);
@@ -250,193 +306,200 @@ Respond ONLY with valid JSON strictly adhering to this schema:
   }
 }
 
+async function generateCrossRepoCompatibilityReview(
+  prs: PRInfo[],
+  perRepoReviews: SinglePRReviewResult[]
+): Promise<{
+  crossRepoAnalysis?: string;
+  breakingChangeWarnings: string[];
+  crossRepoComments: ReviewComment[];
+  breakingChangesStatus: AuditChecklist["breakingChangesStatus"];
+}> {
+  const contractFilePattern =
+    /route|schema|controller|service|api|client|hook|mutation|query|types?\.(ts|tsx)/i;
+
+  const sections = prs
+    .map((pr, index) => {
+      const repoReview = perRepoReviews.find((r) => r.repo.toLowerCase() === pr.repo.toLowerCase());
+      const contractDiffs = pr.files
+        .filter((f) => contractFilePattern.test(f.filename) && f.patch)
+        .map((f) => `#### [${pr.repo}] ${f.filename}\n\`\`\`diff\n${f.patch}\n\`\`\``)
+        .join("\n\n");
+
+      return `
+### Repository ${index + 1}: ${pr.owner}/${pr.repo} (#${pr.pullNumber})
+Per-repo summary: ${repoReview?.summary || "N/A"}
+Blocking findings so far: ${repoReview?.comments.filter((c) => (c.severity ?? "blocking") === "blocking").length ?? 0}
+
+Contract-relevant diffs:
+${contractDiffs || "(none)"}
+${pr.relatedContext?.length ? `\nRelated context files: ${pr.relatedContext.map((c) => c.filename).join(", ")}` : ""}
+`;
+    })
+    .join("\n");
+
+  const prompt = `
+You are verifying Web ⟷ API compatibility for a PAIR of linked pull requests (full-stack feature).
+
+${CROSS_REPO_BREAKING_RULES}
+
+${CORE_REVIEW_PRINCIPLES}
+
+Focus ONLY on cross-repository contract, shared field semantics (IDs vs display names in audit/history UI), deployment order, and bugs that require BOTH repos to reason about.
+
+Per-repo deep reviews are ALREADY DONE. Do NOT repeat their findings unless you found a NEW cross-repo defect.
+
+${sections}
+
+Respond ONLY with JSON:
+{
+  "crossRepoAnalysis": "Detailed Web ⟷ API compatibility narrative...",
+  "breakingChangeWarnings": ["..."],
+  "breakingChangesStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
+  "comments": [
+    {
+      "repo": "exact repo name from input",
+      "path": "file in that repo",
+      "line": 42,
+      "severity": "blocking" | "suggestion",
+      "body": "Cross-repo issue with fix"
+    }
+  ]
+}
+`;
+
+  try {
+    const responseText = await generateReviewWithFallback(prompt);
+    const parsed = JSON.parse(cleanJsonText(responseText));
+    const crossRepoComments = sanitizeReviewComments(
+      Array.isArray(parsed.comments)
+        ? parsed.comments.map((c: any) => ({
+            ...c,
+            repo: prs.find((p) => p.repo.toLowerCase() === String(c.repo || "").toLowerCase())?.repo ?? c.repo,
+          }))
+        : []
+    );
+
+    return {
+      crossRepoAnalysis: parsed.crossRepoAnalysis,
+      breakingChangeWarnings: Array.isArray(parsed.breakingChangeWarnings) ? parsed.breakingChangeWarnings : [],
+      crossRepoComments,
+      breakingChangesStatus: parsed.breakingChangesStatus || (crossRepoComments.length ? "FAILED" : "PASSED"),
+    };
+  } catch (error) {
+    console.warn("[Gemini] Cross-repo pass failed, continuing with per-repo reviews only:", error);
+    return {
+      breakingChangeWarnings: [],
+      crossRepoComments: [],
+      breakingChangesStatus: "NOT_APPLICABLE",
+    };
+  }
+}
+
+function mergeCrossRepoComments(
+  perRepoReviews: SinglePRReviewResult[],
+  crossRepoComments: ReviewComment[]
+): SinglePRReviewResult[] {
+  return perRepoReviews.map((review) => {
+    const extras = crossRepoComments.filter(
+      (c) => c.repo && c.repo.toLowerCase() === review.repo.toLowerCase()
+    );
+    if (extras.length === 0) return review;
+    const merged = sanitizeReviewComments([...review.comments, ...extras]);
+    return {
+      ...review,
+      comments: merged,
+      verdict: computeVerdictFromComments(merged, review.verdict),
+    };
+  });
+}
+
+function mergeOverallAudit(prReviews: SinglePRReviewResult[]): AuditChecklist {
+  const pickWorst = (key: keyof AuditChecklist): "PASSED" | "FAILED" | "NOT_APPLICABLE" => {
+    const statuses = prReviews.map((r) => r.audit?.[key]).filter(Boolean) as string[];
+    if (statuses.includes("FAILED")) return "FAILED";
+    if (statuses.every((s) => s === "NOT_APPLICABLE")) return "NOT_APPLICABLE";
+    return "PASSED";
+  };
+
+  const scores = prReviews.map((r) => r.audit?.confidenceScore ?? 90);
+  const minScore = scores.length ? Math.min(...scores) : 90;
+
+  return {
+    filesInspectedCount: prReviews.reduce((acc, r) => acc + (r.audit?.filesInspectedCount ?? 0), 0),
+    breakingChangesStatus: pickWorst("breakingChangesStatus"),
+    databaseNPlusOneStatus: pickWorst("databaseNPlusOneStatus"),
+    tenantIsolationStatus: pickWorst("tenantIsolationStatus"),
+    uiDesignTokensStatus: pickWorst("uiDesignTokensStatus"),
+    confidenceScore: minScore,
+    auditNotes: "Split per-repo review + dedicated cross-repo compatibility pass.",
+  };
+}
+
 /**
- * Generates a unified, cross-repository review for a pair of linked PRs (e.g. Web + API).
- * Rigorously checks for breaking code across Web <-> API, applies repository UI principles and API rules,
- * and formats separate issue comments for each repository.
+ * Paired PR review: one Gemini pass per repository, then a focused Web ⟷ API pass.
  */
 export async function generatePairedPRReview(prs: PRInfo[]): Promise<AIReviewResult> {
   if (prs.length === 1) {
     return generatePRReview(prs[0]);
   }
 
-  const formattedPRSections = prs
-    .map((pr, index) => {
-      const diffs = pr.files
-        .filter((f) => f.patch)
-        .map((f) => `#### File [${pr.repo}]: ${f.filename}\n\`\`\`diff\n${f.patch}\n\`\`\``)
-        .join("\n\n");
+  console.log(`[Review] Split paired review: ${prs.length} parallel per-repo passes...`);
+  const perRepoResults = await Promise.all(prs.map((pr) => generatePRReview(pr)));
 
-      return `
-======================================================
-Repository #${index + 1}: ${pr.owner}/${pr.repo} (${pr.label || "PR #" + pr.pullNumber})
-======================================================
-- PR URL: ${pr.url}
-- Title: ${pr.title}
-- Author: @${pr.author}
-- Description: ${pr.description}
-
-Changed Files in ${pr.repo} (${pr.files.length} files):
-${diffs || "No patch diff available (e.g. only file creations or binary files)."}
-`;
-    })
-    .join("\n\n");
-
-  const prompt = `
-You are a Staff Full-Stack Software Engineer performing a coordinated, adversarial peer code review on a PAIR OF LINKED PULL REQUESTS representing synchronized frontend and backend changes (e.g. Web + API).
-
-${CORE_REVIEW_PRINCIPLES}
-
-${CROSS_REPO_BREAKING_RULES}
-
-${FRONTEND_UI_RULES}
-
-${BACKEND_API_RULES}
-
-${formattedPRSections}
-
-Review Requirements:
-1. **CRITICAL BREAKING CODE CHECK (Web <-> API)**:
-   - Check if changes in Web will break API, or changes in API will break Web.
-   - Check if API introduces new required parameters or validation (e.g. \`required = true\` on a resolver or form submission) that Web does not supply.
-   - Check endpoint routes, URL params, request body field names (camelCase vs snake_case), response DTO formats, and enum synchronization.
-   - List any breaking change warnings in "breakingChangeWarnings".
-2. **DATABASE N+1 QUERY LOOP AUDIT (STRICT CHECK)**:
-   - Carefully scan backend changes for any database mutation or select (\`await tx.update\`, \`await tx.select\`, \`await tx.insert\`) inside a loop (\`for\`, \`for...of\`, \`for...in\`, \`.map()\`, \`forEach()\`).
-   - If found, you MUST mark \`databaseNPlusOneStatus: "FAILED"\` and create a dedicated comment on the exact line explaining how to batch the operation.
-3. **STRICT ZERO-FLUFF MANDATE**:
-   - NEVER praise or compliment the code (no "great addition", "looks clean", "well handled").
-   - If a PR has no bugs or violations, its \`comments\` array MUST BE EMPTY: \`[]\`.
-4. **Frontend STE & Architecture (Web PR in pair)**:
-   - Apply PeopleFirst Web rules only to the Web repository diff. Cross-check STE categories from touched files; cite guideline \`id\` on findings.
-   - Block \`src/components/ui/\` edits, stack fast-breakers, and common UI regressions (loaders, \`window.confirm\`, wrong tokens).
-5. **Dedicated Review per Repository**:
-   - Provide a separate review object in "prReviews" for EACH repository.
-
-Respond ONLY with valid JSON strictly adhering to this schema:
-{
-  "summary": "Unified executive overview of the coordinated full-stack changes...",
-  "crossRepoAnalysis": "Detailed analysis of Web <-> API contract compatibility, endpoint matching, type synchronization, and deployment notes...",
-  "breakingChangeWarnings": [
-    "Warning: API renamed 'company_id' to 'companyId', but Web still accesses 'response.company_id'"
-  ],
-  "verdict": "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
-  "audit": {
-    "filesInspectedCount": ${prs.reduce((acc, p) => acc + p.files.length, 0)},
-    "breakingChangesStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
-    "databaseNPlusOneStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
-    "tenantIsolationStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
-    "uiDesignTokensStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
-    "confidenceScore": 95,
-    "auditNotes": "Concise summary of audit findings"
-  },
-  "prReviews": [
-${prs
-  .map(
-    (p) => `    {
-      "repo": "${p.repo}",
-      "pullNumber": ${p.pullNumber},
-      "verdict": "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
-      "summary": "Specific review summary for ${p.repo}...",
-      "audit": {
-        "filesInspectedCount": ${p.files.length},
-        "breakingChangesStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
-        "databaseNPlusOneStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
-        "tenantIsolationStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
-        "uiDesignTokensStatus": "PASSED" | "FAILED" | "NOT_APPLICABLE",
-        "confidenceScore": 95,
-        "auditNotes": "Audit notes for ${p.repo}"
-      },
-      "comments": [
-        {
-          "repo": "${p.repo}",
-          "path": "path/to/file.ts",
-          "line": 42,
-          "body": "Exact defect with markdown code replacement snippet..."
-        }
-      ]
-    }`
-  )
-  .join(",\n")}
-  ],
-  "comments": []
-}
-`;
-
-  try {
-    const responseText = await generateReviewWithFallback(prompt);
-    const cleanedText = cleanJsonText(responseText);
-    const parsed = JSON.parse(cleanedText);
-
-    if (parsed.error) {
-      throw new Error(parsed.error.message || JSON.stringify(parsed.error));
-    }
-
-    const prReviews: SinglePRReviewResult[] = [];
-    const allComments: ReviewComment[] = [];
-
-    if (Array.isArray(parsed.prReviews)) {
-      for (const pr of prs) {
-        const found = parsed.prReviews.find(
-          (r: any) => String(r.repo).toLowerCase() === pr.repo.toLowerCase()
-        );
-        const rawRepoComments = Array.isArray(found?.comments)
-          ? found.comments.map((c: any) => ({ ...c, repo: pr.repo }))
-          : [];
-        const sanitizedRepoComments = sanitizeReviewComments(rawRepoComments);
-
-        const prAudit: AuditChecklist = {
-          filesInspectedCount: pr.files.length,
-          breakingChangesStatus: found?.audit?.breakingChangesStatus || "PASSED",
-          databaseNPlusOneStatus: found?.audit?.databaseNPlusOneStatus || "PASSED",
-          tenantIsolationStatus: found?.audit?.tenantIsolationStatus || "PASSED",
-          uiDesignTokensStatus: found?.audit?.uiDesignTokensStatus || "PASSED",
-          confidenceScore: typeof found?.audit?.confidenceScore === "number" ? found.audit.confidenceScore : 92,
-          auditNotes: found?.audit?.auditNotes,
-        };
-
-        prReviews.push({
-          repo: pr.repo,
-          pullNumber: pr.pullNumber,
-          title: pr.title,
-          url: pr.url,
-          author: pr.author,
-          label: pr.label,
-          verdict: ["APPROVE", "REQUEST_CHANGES", "COMMENT"].includes(found?.verdict)
-            ? found.verdict
-            : "COMMENT",
-          summary: found?.summary || `Review for ${pr.repo} completed.`,
-          audit: prAudit,
-          comments: sanitizedRepoComments,
-        });
-
-        allComments.push(...sanitizedRepoComments);
-      }
-    }
-
-    const overallAudit: AuditChecklist = {
-      filesInspectedCount: prs.reduce((acc, p) => acc + p.files.length, 0),
-      breakingChangesStatus: parsed.audit?.breakingChangesStatus || "PASSED",
-      databaseNPlusOneStatus: parsed.audit?.databaseNPlusOneStatus || "PASSED",
-      tenantIsolationStatus: parsed.audit?.tenantIsolationStatus || "PASSED",
-      uiDesignTokensStatus: parsed.audit?.uiDesignTokensStatus || "PASSED",
-      confidenceScore: typeof parsed.audit?.confidenceScore === "number" ? parsed.audit.confidenceScore : 94,
-      auditNotes: parsed.audit?.auditNotes || "Cross-repository audit completed.",
-    };
-
+  let prReviews: SinglePRReviewResult[] = perRepoResults.map((result, i) => {
+    const fromNested = result.prReviews?.[0];
+    if (fromNested) return fromNested;
     return {
-      summary: parsed.summary || "Coordinated review completed. No major issues observed.",
-      crossRepoAnalysis: parsed.crossRepoAnalysis,
-      breakingChangeWarnings: Array.isArray(parsed.breakingChangeWarnings) ? parsed.breakingChangeWarnings : [],
-      verdict: ["APPROVE", "REQUEST_CHANGES", "COMMENT"].includes(parsed.verdict)
-        ? parsed.verdict
-        : "COMMENT",
-      audit: overallAudit,
-      prReviews,
-      comments: allComments,
+      repo: prs[i].repo,
+      pullNumber: prs[i].pullNumber,
+      title: prs[i].title,
+      url: prs[i].url,
+      author: prs[i].author,
+      label: prs[i].label,
+      verdict: result.verdict,
+      summary: result.summary,
+      audit: result.audit,
+      comments: result.comments,
     };
-  } catch (error: any) {
-    console.error("Gemini Paired Review Error:", error);
-    throw error;
+  });
+
+  console.log("[Review] Cross-repo compatibility pass...");
+  const cross = await generateCrossRepoCompatibilityReview(prs, prReviews);
+  prReviews = mergeCrossRepoComments(prReviews, cross.crossRepoComments);
+
+  if (cross.breakingChangesStatus === "FAILED") {
+    prReviews = prReviews.map((r) => ({
+      ...r,
+      audit: r.audit
+        ? { ...r.audit, breakingChangesStatus: "FAILED" as const }
+        : r.audit,
+    }));
   }
+
+  const allComments = prReviews.flatMap((r) => r.comments.map((c) => ({ ...c, repo: r.repo })));
+  const overallVerdict = prReviews.some((r) => r.verdict === "REQUEST_CHANGES")
+    ? "REQUEST_CHANGES"
+    : prReviews.some((r) => r.verdict === "COMMENT")
+    ? "COMMENT"
+    : "APPROVE";
+
+  const summary =
+    prReviews.map((r) => `**${r.label || r.repo}**: ${r.summary}`).join("\n\n") ||
+    "Coordinated review completed.";
+
+  const overallAudit = mergeOverallAudit(prReviews);
+  if (cross.breakingChangesStatus === "FAILED") {
+    overallAudit.breakingChangesStatus = "FAILED";
+  }
+
+  return {
+    summary,
+    crossRepoAnalysis: cross.crossRepoAnalysis,
+    breakingChangeWarnings: cross.breakingChangeWarnings,
+    verdict: overallVerdict,
+    audit: overallAudit,
+    prReviews,
+    comments: allComments,
+  };
 }

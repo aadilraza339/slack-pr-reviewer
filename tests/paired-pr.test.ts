@@ -1,5 +1,10 @@
 import { parseAllPRUrls } from "../src/github.js";
 import { buildPullRequestReviewPayload, cleanReviewMarkdown } from "../src/reviewMarkdown.js";
+import { partitionComments, computeVerdictFromComments } from "../src/reviewCommentUtils.js";
+import {
+  getSiblingDirectoriesFromChangedFiles,
+  getOptionalCompanionPathsForRepo,
+} from "../src/companionFiles.js";
 import {
   buildReviewApprovalBlocks,
   buildPairedOverviewBlocks,
@@ -166,6 +171,37 @@ api: https://github.com/wysbryxtech/peoplefirst-api/pull/2925
     throw new Error(`Review JSON payload invalid: ${JSON.stringify(payload)}`);
   }
   console.log("✓ Test 4: Review markdown cleaning and JSON payload shape verified.");
+
+  const parts = partitionComments([
+    { path: "a.ts", line: 1, body: "bug", severity: "blocking" },
+    { path: "b.ts", line: 2, body: "nit", severity: "suggestion" },
+  ]);
+  if (parts.blocking.length !== 1 || parts.suggestions.length !== 1) {
+    throw new Error("partitionComments failed");
+  }
+  if (computeVerdictFromComments(parts.blocking, "APPROVE") !== "REQUEST_CHANGES") {
+    throw new Error("blocking should force REQUEST_CHANGES");
+  }
+  console.log("✓ Test 5: Blocking vs suggestion tiers verified.");
+
+  const sibDirs = getSiblingDirectoriesFromChangedFiles([
+    "src/services/billing/createInvoice.ts",
+    "src/features/payroll/views/RunDetail.tsx",
+  ]);
+  if (
+    !sibDirs.includes("src/services/billing") ||
+    !sibDirs.includes("src/features/payroll/views")
+  ) {
+    throw new Error(`Unexpected sibling dirs: ${JSON.stringify(sibDirs)}`);
+  }
+  if (sibDirs.includes("src")) {
+    throw new Error("Should not list shallow src/ as sibling directory");
+  }
+  const optional = getOptionalCompanionPathsForRepo("any-repo", ["src/a.ts"]);
+  if (optional.size !== 0 && !process.env.PR_REVIEW_COMPANION_RULES_PATH) {
+    throw new Error("Optional companions should be empty without rules file");
+  }
+  console.log("✓ Test 6: Generic sibling directory detection verified.");
 
   console.log("\nALL TESTS PASSED SUCCESSFULLY! 🎉");
 }

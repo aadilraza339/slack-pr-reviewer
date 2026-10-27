@@ -7,7 +7,7 @@ An automated PR review bot that listens to Slack mentions/messages, analyzes Git
 ## 🌟 How It Works
 
 1. **Trigger**: A colleague tags the bot or posts a PR URL in Slack (e.g., `@ReviewBot please review https://github.com/org/repo/pull/42`).
-2. **AI Diff Analysis**: The bot fetches changed files & git diffs from GitHub and prompts Gemini Flash for:
+2. **AI Diff Analysis**: The bot fetches changed files (paginated), **import-related source context**, runs **separate reviews per repo** for paired Web+API PRs, then a **cross-repo compatibility** pass. Gemini returns **blocking** vs **suggestion** inline comments:
    - A high-level architectural & quality summary.
    - Specific inline code comments (with file paths and line numbers).
    - An overall suggested verdict (`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`).
@@ -61,6 +61,18 @@ The bot reads your session via `gh auth token` at startup. No `ghp_...` string i
 Env token wins if both are set.
 
 When **`gh`** is installed, approved reviews are posted with `gh api repos/.../pulls/.../reviews --input` and a JSON body (`event`, `body`, `comments[]`)—same approach as scripting reviews by hand. Comment text is normalized before send; if inline lines fail validation, the bot falls back to a summary-only review with comments in the body.
+
+### Deep context + optional CI (hosted)
+
+Reviews load **sibling modules** (same folder as each changed `.ts`/`.tsx` file) plus imports—not just the PR diff. Optional explicit companions: `companion-rules.example.json` + `PR_REVIEW_COMPANION_RULES_PATH`.
+
+| Command | Purpose |
+|---------|---------|
+| `npm run pr:context -- <pr-url>` | List related context files fetched for a PR |
+| `npm run pr:ci -- <pr-url>` | Clone PR head and run build/test/lint |
+| `npm run pr:check -- <url> [url2]` | Context + CI for paired PRs |
+
+Set `PR_REVIEW_RUN_CI=true` in `.env` on your **live** host so Slack-triggered reviews also run CI (adds several minutes; requires `git` + `gh` on the machine).
 
 ---
 

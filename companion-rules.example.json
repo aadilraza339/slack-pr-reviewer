@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy to companion-rules.json and set PR_REVIEW_COMPANION_RULES_PATH=companion-rules.json only if you need explicit cross-folder companions. Sibling loading is automatic for any PR.",
+  "peoplefirst-api": [
+    {
+      "label": "example-explicit-companions",
+      "whenPathMatches": "src/services/example/",
+      "companions": ["src/services/example/relatedService.ts"]
+    }
+  ],
+  "*": []
+}
