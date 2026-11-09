@@ -71,6 +71,7 @@ Reviews load **sibling modules** (same folder as each changed `.ts`/`.tsx` file)
 | `npm run pr:context -- <pr-url>` | List related context files fetched for a PR |
 | `npm run pr:ci -- <pr-url>` | Clone PR head and run build/test/lint |
 | `npm run pr:check -- <url> [url2]` | Context + CI for paired PRs |
+| `npm test` | Run the verdict rules without calling Gemini or Slack |
 
 Set `PR_REVIEW_RUN_CI=true` in `.env` on your **live** host so Slack-triggered reviews also run CI (adds several minutes; requires `git` + `gh` on the machine).
 

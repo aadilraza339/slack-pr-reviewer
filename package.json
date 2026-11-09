@@ -10,7 +10,8 @@
     "start:prod": "node dist/index.js",
     "pr:context": "tsx scripts/pr-review-check.ts --context",
     "pr:ci": "PR_REVIEW_RUN_CI=true tsx scripts/pr-review-check.ts --ci",
-    "pr:check": "PR_REVIEW_RUN_CI=true tsx scripts/pr-review-check.ts --context --ci"
+    "pr:check": "PR_REVIEW_RUN_CI=true tsx scripts/pr-review-check.ts --context --ci",
+    "test": "tsx --test tests/verdict.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.30.0",
